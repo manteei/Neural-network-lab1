@@ -47,62 +47,82 @@ def prepare_data(X_train, X_test, y_train, y_test, batch_size=64):
 
 
 # Функция для обучения модели
-def train_model(model, train_loader, criterion, optimizer, num_epochs=10):
+def train_model(model, train_loader, test_loader, criterion, optimizer, num_epochs=10):
     model.train()
-    losses = []
+    train_losses = []
+    test_losses = []
+    train_accuracies = []
+    test_accuracies = []
+
     for epoch in range(num_epochs):
         running_loss = 0.0
-        for i, (inputs, labels) in enumerate(train_loader):
+        correct = 0
+        total = 0
+
+        # Training step
+        for inputs, labels in train_loader:
             outputs = model(inputs)
             loss = criterion(outputs, labels)
 
             optimizer.zero_grad()
-
             loss.backward()
             optimizer.step()
 
             running_loss += loss.item()
 
-        avg_loss = running_loss / len(train_loader)
-        losses.append(avg_loss)
-        print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}')
-
-    return losses
-
-
-# Функция для тестирования модели и расчета метрик
-def evaluate_model(model, test_loader):
-    model.eval()
-    correct = 0
-    total = 0
-    all_predictions = []
-    all_labels = []
-
-    with torch.no_grad():
-        for inputs, labels in test_loader:
-            outputs = model(inputs)
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
-            all_predictions.extend(predicted.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
+        avg_loss = running_loss / len(train_loader)
+        train_losses.append(avg_loss)
+        train_accuracy = 100 * correct / total
+        train_accuracies.append(train_accuracy)
 
+        # Evaluate on test set at each epoch
+        test_loss, test_accuracy = evaluate_model(model, test_loader, criterion)
+        test_losses.append(test_loss)
+        test_accuracies.append(test_accuracy)
+
+        print(f'Epoch [{epoch + 1}/{num_epochs}], '
+              f'Train Loss: {avg_loss:.4f}, Train Accuracy: {train_accuracy:.2f}%, '
+              f'Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}%')
+
+    return train_losses, test_losses, train_accuracies, test_accuracies
+
+
+# Функция для тестирования модели и расчета метрик
+def evaluate_model(model, test_loader, criterion):
+    model.eval()
+    correct = 0
+    total = 0
+    running_loss = 0.0
+
+    with torch.no_grad():
+        for inputs, labels in test_loader:
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            running_loss += loss.item()
+
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+    avg_loss = running_loss / len(test_loader)
     accuracy = 100 * correct / total
 
-    return accuracy, all_predictions, all_labels
+    return avg_loss, accuracy
 
 
 # Функция для визуализации
-def plot_loss(losses, model_info, hypothesis_number):
+def plot_loss(losses, model_info, hypothesis_number, plot_type):
     plt.figure(figsize=(10, 5))
-    plt.title(f"Training Loss - {model_info} (Hypothesis {hypothesis_number})")
-    plt.plot(losses, label="loss")
+    plt.title(f" {model_info} (Hypothesis {hypothesis_number})")
+    plt.plot(losses, label=plot_type)
     plt.xlabel("Epoch")
-    plt.ylabel("Loss")
+    plt.ylabel(plot_type)
     plt.legend()
     plt.show()
-
 
 
 # Функция для визуализации предсказаний
@@ -131,21 +151,19 @@ def preprocess_data(texts, labels):
 # Функция для проверки гипотез
 def test_hypothesis(input_size, hidden_size, output_size, num_layers, X_train, X_test, y_train, y_test, num_epochs,
                     batch_size):
-
     model = create_model(input_size, hidden_size, output_size, num_layers)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     train_loader, test_loader = prepare_data(X_train, X_test, y_train, y_test, batch_size)
 
-    losses = train_model(model, train_loader, criterion, optimizer, num_epochs)
-    accuracy, predictions, labels = evaluate_model(model, test_loader)
+    train_losses, test_losses, train_accuracies, test_accuracies = train_model(model, train_loader, test_loader,
+                                                                               criterion, optimizer, num_epochs)
 
-    return accuracy, losses
+    return train_losses, test_losses, train_accuracies, test_accuracies
 
 
 # Пример использования модели
 if __name__ == "__main__":
-
     input_size = 100
     hidden_size = 128
     output_size = 2
@@ -162,47 +180,67 @@ if __name__ == "__main__":
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     print("Гипотеза 1: Однослойная LSTM vs Двухслойная LSTM")
-    accuracy_single, losses_single = test_hypothesis(input_size, hidden_size, output_size, num_layers=1,
-                                                     X_train=X_train, X_test=X_test,
-                                                     y_train=y_train, y_test=y_test,
-                                                     num_epochs=num_epochs, batch_size=batch_size)
-    print(f'Точность однослойной LSTM: {accuracy_single:.2f}%')
+    print("Однослойная")
+    train_losses_single, test_losses_single, train_acc_single, test_acc_single = test_hypothesis(input_size, hidden_size, output_size, num_layers=1,
+                                                                                                  X_train=X_train, X_test=X_test,
+                                                                                                  y_train=y_train, y_test=y_test,
+                                                                                                  num_epochs=num_epochs, batch_size=batch_size)
+    print("Двухслойная")
+    train_losses_double, test_losses_double, train_acc_double, test_acc_double = test_hypothesis(input_size, hidden_size, output_size, num_layers=2,
+                                                                                                  X_train=X_train, X_test=X_test,
+                                                                                                  y_train=y_train, y_test=y_test,
+                                                                                                  num_epochs=num_epochs, batch_size=batch_size)
 
-    accuracy_double, losses_double = test_hypothesis(input_size, hidden_size, output_size, num_layers=2,
-                                                     X_train=X_train, X_test=X_test,
-                                                     y_train=y_train, y_test=y_test,
-                                                     num_epochs=num_epochs, batch_size=batch_size)
-    print(f'Точность двухслойной LSTM: {accuracy_double:.2f}%')
-
-    plot_loss(losses_single, "Однослойная LSTM", 1)
-    plot_loss(losses_double, "Двухслойная LSTM", 1)
+    plot_loss(train_losses_single, "Потери для тренировочной выборки однослойной LSTM ", 1,"loss")
+    plot_loss(train_losses_double, "Потери для тренировочной выборки двухслойной LSTM", 1,"loss")
+    plot_loss(test_losses_single, "Потери для тестовой выборки однослойной LSTM ", 1,"loss")
+    plot_loss(test_losses_double, "Потери для тестовой выборки двухслойной LSTM", 1, "loss")
+    plot_loss(train_acc_single, "Точность для тренировочной выборки однослойной LSTM ", 1, "accuracy")
+    plot_loss(train_acc_double, "Точность для тренировочной выборки двухслойной LSTM", 1, "accuracy")
+    plot_loss(test_acc_single, "Точность для тестовой выборки однослойной LSTM ", 1, "accuracy")
+    plot_loss(test_acc_double, "Точность для тестовой выборки двухслойной LSTM", 1, "accuracy")
 
     print("Гипотеза 2: Увеличение hidden_size с 128 до 256")
-    accuracy_small_hidden, losses_small_hidden  = test_hypothesis(input_size, 128, output_size, num_layers=1,
-                                               X_train=X_train, X_test=X_test,
-                                               y_train=y_train, y_test=y_test,
-                                               num_epochs=num_epochs, batch_size=batch_size)
-    accuracy_large_hidden, losses_large_hidden  = test_hypothesis(input_size, 256, output_size, num_layers=1,
-                                               X_train=X_train, X_test=X_test,
-                                               y_train=y_train, y_test=y_test,
-                                               num_epochs=num_epochs, batch_size=batch_size)
-    print(f'Точность модели с hidden_size=128: {accuracy_small_hidden:.2f}%')
-    print(f'Точность модели с hidden_size=256: {accuracy_large_hidden:.2f}%')
-
-    plot_loss(losses_small_hidden, "LSTM hidden_size=128", 2)
-    plot_loss(losses_large_hidden, "LSTM hidden_size=256", 2)
+    print("128")
+    train_losses_small_hidden, test_losses_small_hidden, train_acc_small_hidden, test_acc_small_hidden = test_hypothesis(
+        input_size, 128, output_size, num_layers=1,
+        X_train=X_train, X_test=X_test,
+        y_train=y_train, y_test=y_test,
+        num_epochs=num_epochs, batch_size=batch_size)
+    print("256")
+    train_losses_big_hidden, test_losses_big_hidden, train_acc_big_hidden, test_acc_big_hidden = test_hypothesis(
+        input_size, 256, output_size, num_layers=1,
+        X_train=X_train, X_test=X_test,
+        y_train=y_train, y_test=y_test,
+        num_epochs=num_epochs, batch_size=batch_size)
+    plot_loss(train_losses_small_hidden, "Потери для тренировочной выборки hidden_size=128 ", 2,"loss")
+    plot_loss(train_losses_big_hidden, "Потери для тренировочной выборки hidden_size=256", 2,"loss")
+    plot_loss(test_losses_small_hidden, "Потери для тестовой выборки hidden_size=128 ", 2,"loss")
+    plot_loss(test_losses_big_hidden, "Потери для тестовой выборки hidden_size=256", 2,"loss")
+    plot_loss(train_acc_small_hidden, "Точность для тренировочной выборки hidden_size=128 ", 2, "accuracy")
+    plot_loss(train_acc_big_hidden, "Точность для тренировочной выборки hidden_size=256", 2, "accuracy")
+    plot_loss(test_acc_small_hidden, "Точность для тестовой выборки hidden_size=128 ", 2, "accuracy")
+    plot_loss(test_acc_big_hidden, "Точность для тестовой выборки hidden_size=256", 2, "accuracy")
 
     print("Гипотеза 3: Увеличение числа эпох с 10 до 20")
-    accuracy_short_epochs, losses_short_epochs  = test_hypothesis(input_size, hidden_size, output_size, num_layers=1,
-                                               X_train=X_train, X_test=X_test,
-                                               y_train=y_train, y_test=y_test,
-                                               num_epochs=10, batch_size=batch_size)
-    accuracy_long_epochs, losses_long_epochs  = test_hypothesis(input_size, hidden_size, output_size, num_layers=1,
-                                              X_train=X_train, X_test=X_test,
-                                              y_train=y_train, y_test=y_test,
-                                              num_epochs=20, batch_size=batch_size)
-    print(f'Точность модели с 10 эпохами: {accuracy_short_epochs:.2f}%')
-    print(f'Точность модели с 20 эпохами: {accuracy_long_epochs:.2f}%')
+    print("10 эпох")
+    train_losses_short_epochs, test_losses_short_epochs, train_acc_short_epochs, test_acc_short_epochs = test_hypothesis(
+        input_size, hidden_size, output_size, num_layers=1,
+        X_train=X_train, X_test=X_test,
+        y_train=y_train, y_test=y_test,
+        num_epochs=10, batch_size=batch_size)
+    print("20 эпох")
+    train_losses_long_epochs, test_losses_long_epochs, train_acc_long_epochs, test_acc_long_epochs = test_hypothesis(
+        input_size, hidden_size, output_size, num_layers=1,
+        X_train=X_train, X_test=X_test,
+        y_train=y_train, y_test=y_test,
+        num_epochs=20, batch_size=batch_size)
 
-    plot_loss(losses_short_epochs, "10 epochs", 3)
-    plot_loss(losses_long_epochs, "20 epochs", 3)
+    plot_loss(train_losses_short_epochs, "Потери для тренировочной выборки 10 эпох ", 3, "loss")
+    plot_loss(train_losses_long_epochs, "Потери для тренировочной выборки 20 эпох", 3, "loss")
+    plot_loss(test_losses_short_epochs, "Потери для тестовой выборки 10 эпох ", 3, "loss")
+    plot_loss(test_losses_long_epochs, "Потери для тестовой выборки 20 эпох", 3, "loss")
+    plot_loss(train_acc_short_epochs, "Точность для тренировочной выборки 10 эпох ", 3, "accuracy")
+    plot_loss(train_acc_long_epochs, "Точность для тренировочной выборки 20 эпох", 3, "accuracy")
+    plot_loss(test_acc_short_epochs, "Точность для тестовой выборки 10 эпох", 3, "accuracy")
+    plot_loss(test_acc_long_epochs, "Точность для тестовой выборки 20 эпох", 3, "accuracy")
