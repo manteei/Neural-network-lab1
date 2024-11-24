@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import CountVectorizer
+import time
+import warnings
 
 
 class FakeNewsLSTM(nn.Module):
@@ -117,7 +119,7 @@ def evaluate_model(model, test_loader, criterion):
 # Функция для визуализации
 def plot_loss(losses, model_info, hypothesis_number, plot_type):
     plt.figure(figsize=(10, 5))
-    plt.title(f" {model_info} (Hypothesis {hypothesis_number})")
+    plt.title(f" {model_info}")
     plt.plot(losses, label=plot_type)
     plt.xlabel("Epoch")
     plt.ylabel(plot_type)
@@ -162,8 +164,65 @@ def test_hypothesis(input_size, hidden_size, output_size, num_layers, X_train, X
     return train_losses, test_losses, train_accuracies, test_accuracies
 
 
-# Пример использования модели
+def dynamic_quantize_model(model):
+    model.eval()
+    model = torch.quantization.prepare(model, inplace=False)
+    quantized_model = torch.quantization.quantize_dynamic(
+        model, {torch.nn.Linear, torch.nn.LSTM}, dtype=torch.qint8
+    )
+    return quantized_model
+
+
+def compare_models(original_model, quantized_model, test_loader):
+    start_time = time.time()
+    original_loss, original_accuracy = evaluate_model(original_model, test_loader, nn.CrossEntropyLoss())
+    original_inference_time = time.time() - start_time
+
+    start_time = time.time()
+    quantized_loss, quantized_accuracy = evaluate_model(quantized_model, test_loader, nn.CrossEntropyLoss())
+    quantized_inference_time = time.time() - start_time
+
+    original_size = sum(p.numel() for p in original_model.parameters()) * 4 / (1024 ** 2)  # в MB
+    quantized_size = sum(p.numel() for p in quantized_model.parameters()) * 1 / (1024 ** 2)  # в MB
+
+    print(f"Исходная модель: Время инференса = {original_inference_time:.4f} сек, Размер = {original_size:.2f} MB")
+    print(f"Квантованная модель: Время инференса = {quantized_inference_time:.4f} сек, Размер = {quantized_size:.2f} MB")
+
+    return original_accuracy, quantized_accuracy
+
+
+
+def show_incorrect_predictions(model, test_loader, device):
+    model.eval()
+    incorrect_samples = []
+
+    with torch.no_grad():
+        for inputs, labels in test_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+
+            outputs = model(inputs)
+            _, predicted = torch.max(outputs, 1)
+
+            incorrect = predicted != labels
+            for i in range(len(labels)):
+                if incorrect[i]:
+                    incorrect_samples.append((inputs[i], labels[i], predicted[i]))
+
+            if len(incorrect_samples) >= 5:
+                break
+
+    for idx, (input_data, true_label, pred_label) in enumerate(incorrect_samples):
+
+        text = ' '.join([str(x) for x in input_data.cpu().numpy()])
+
+        print(f"Sample {idx}:")
+        print(f"Текст: {text}")
+        print(f"Истинное: {true_label.item()}, Предсказано: {pred_label.item()}")
+        print("=" * 50)
+
+
 if __name__ == "__main__":
+    warnings.filterwarnings("ignore", category=UserWarning, module="torch")
     input_size = 100
     hidden_size = 128
     output_size = 2
@@ -179,68 +238,53 @@ if __name__ == "__main__":
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    print("Гипотеза 1: Однослойная LSTM vs Двухслойная LSTM")
-    print("Однослойная")
-    train_losses_single, test_losses_single, train_acc_single, test_acc_single = test_hypothesis(input_size, hidden_size, output_size, num_layers=1,
-                                                                                                  X_train=X_train, X_test=X_test,
-                                                                                                  y_train=y_train, y_test=y_test,
-                                                                                                  num_epochs=num_epochs, batch_size=batch_size)
-    print("Двухслойная")
-    train_losses_double, test_losses_double, train_acc_double, test_acc_double = test_hypothesis(input_size, hidden_size, output_size, num_layers=2,
-                                                                                                  X_train=X_train, X_test=X_test,
-                                                                                                  y_train=y_train, y_test=y_test,
-                                                                                                  num_epochs=num_epochs, batch_size=batch_size)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    plot_loss(train_losses_single, "Потери для тренировочной выборки однослойной LSTM ", 1,"loss")
-    plot_loss(train_losses_double, "Потери для тренировочной выборки двухслойной LSTM", 1,"loss")
-    plot_loss(test_losses_single, "Потери для тестовой выборки однослойной LSTM ", 1,"loss")
-    plot_loss(test_losses_double, "Потери для тестовой выборки двухслойной LSTM", 1, "loss")
-    plot_loss(train_acc_single, "Точность для тренировочной выборки однослойной LSTM ", 1, "accuracy")
-    plot_loss(train_acc_double, "Точность для тренировочной выборки двухслойной LSTM", 1, "accuracy")
-    plot_loss(test_acc_single, "Точность для тестовой выборки однослойной LSTM ", 1, "accuracy")
-    plot_loss(test_acc_double, "Точность для тестовой выборки двухслойной LSTM", 1, "accuracy")
+    print("Исходная модель")
+    train_losses_single, test_losses_single, train_acc_single, test_acc_single = test_hypothesis(input_size,
+                                                                                                 hidden_size,
+                                                                                                 output_size,
+                                                                                                 num_layers=1,
+                                                                                                 X_train=X_train,
+                                                                                                 X_test=X_test,
+                                                                                                 y_train=y_train,
+                                                                                                 y_test=y_test,
+                                                                                                 num_epochs=num_epochs,
+                                                                                                 batch_size=batch_size)
 
-    print("Гипотеза 2: Увеличение hidden_size с 128 до 256")
-    print("128")
-    train_losses_small_hidden, test_losses_small_hidden, train_acc_small_hidden, test_acc_small_hidden = test_hypothesis(
-        input_size, 128, output_size, num_layers=1,
-        X_train=X_train, X_test=X_test,
-        y_train=y_train, y_test=y_test,
-        num_epochs=num_epochs, batch_size=batch_size)
-    print("256")
-    train_losses_big_hidden, test_losses_big_hidden, train_acc_big_hidden, test_acc_big_hidden = test_hypothesis(
-        input_size, 256, output_size, num_layers=1,
-        X_train=X_train, X_test=X_test,
-        y_train=y_train, y_test=y_test,
-        num_epochs=num_epochs, batch_size=batch_size)
-    plot_loss(train_losses_small_hidden, "Потери для тренировочной выборки hidden_size=128 ", 2,"loss")
-    plot_loss(train_losses_big_hidden, "Потери для тренировочной выборки hidden_size=256", 2,"loss")
-    plot_loss(test_losses_small_hidden, "Потери для тестовой выборки hidden_size=128 ", 2,"loss")
-    plot_loss(test_losses_big_hidden, "Потери для тестовой выборки hidden_size=256", 2,"loss")
-    plot_loss(train_acc_small_hidden, "Точность для тренировочной выборки hidden_size=128 ", 2, "accuracy")
-    plot_loss(train_acc_big_hidden, "Точность для тренировочной выборки hidden_size=256", 2, "accuracy")
-    plot_loss(test_acc_small_hidden, "Точность для тестовой выборки hidden_size=128 ", 2, "accuracy")
-    plot_loss(test_acc_big_hidden, "Точность для тестовой выборки hidden_size=256", 2, "accuracy")
+    plot_loss(train_losses_single, "Потери для тренировочной выборки", 1, "loss")
+    plot_loss(test_losses_single, "Потери для тестовой выборки", 1, "loss")
+    plot_loss(train_acc_single, "Точность для тренировочной выборки", 1, "accuracy")
+    plot_loss(test_acc_single, "Точность для тестовой выборки", 1, "accuracy")
 
-    print("Гипотеза 3: Увеличение числа эпох с 10 до 20")
-    print("10 эпох")
-    train_losses_short_epochs, test_losses_short_epochs, train_acc_short_epochs, test_acc_short_epochs = test_hypothesis(
-        input_size, hidden_size, output_size, num_layers=1,
-        X_train=X_train, X_test=X_test,
-        y_train=y_train, y_test=y_test,
-        num_epochs=10, batch_size=batch_size)
-    print("20 эпох")
-    train_losses_long_epochs, test_losses_long_epochs, train_acc_long_epochs, test_acc_long_epochs = test_hypothesis(
-        input_size, hidden_size, output_size, num_layers=1,
-        X_train=X_train, X_test=X_test,
-        y_train=y_train, y_test=y_test,
-        num_epochs=20, batch_size=batch_size)
+    original_model = create_model(input_size, hidden_size, output_size)
+    quantized_model = dynamic_quantize_model(original_model)
 
-    plot_loss(train_losses_short_epochs, "Потери для тренировочной выборки 10 эпох ", 3, "loss")
-    plot_loss(train_losses_long_epochs, "Потери для тренировочной выборки 20 эпох", 3, "loss")
-    plot_loss(test_losses_short_epochs, "Потери для тестовой выборки 10 эпох ", 3, "loss")
-    plot_loss(test_losses_long_epochs, "Потери для тестовой выборки 20 эпох", 3, "loss")
-    plot_loss(train_acc_short_epochs, "Точность для тренировочной выборки 10 эпох ", 3, "accuracy")
-    plot_loss(train_acc_long_epochs, "Точность для тренировочной выборки 20 эпох", 3, "accuracy")
-    plot_loss(test_acc_short_epochs, "Точность для тестовой выборки 10 эпох", 3, "accuracy")
-    plot_loss(test_acc_long_epochs, "Точность для тестовой выборки 20 эпох", 3, "accuracy")
+    criterion = nn.CrossEntropyLoss()
+    train_loader, test_loader = prepare_data(X_train, X_test, y_train, y_test, batch_size)
+
+    print("Квантованная модель")
+    train_losses_quantized, test_losses_quantized, train_acc_quantized, test_acc_quantized = test_hypothesis(input_size,
+                                                                                                             hidden_size,
+                                                                                                             output_size,
+                                                                                                             num_layers=1,
+                                                                                                             X_train=X_train,
+                                                                                                             X_test=X_test,
+                                                                                                             y_train=y_train,
+                                                                                                             y_test=y_test,
+                                                                                                             num_epochs=num_epochs,
+                                                                                                             batch_size=batch_size)
+
+    #Графики для квантованной модели
+    plot_loss(train_losses_quantized, "Потери для тренировочной выборки (Квантованная)", 1, "loss")
+    plot_loss(test_losses_quantized, "Потери для тестовой выборки (Квантованная)", 1, "loss")
+    plot_loss(train_acc_quantized, "Точность для тренировочной выборки (Квантованная)", 1, "accuracy")
+    plot_loss(test_acc_quantized, "Точность для тестовой выборки (Квантованная)", 1, "accuracy")
+
+    compare_models(original_model, quantized_model, test_loader)
+
+    print("Ошибочные предсказания для оригинальной модели:")
+    show_incorrect_predictions(original_model, test_loader, device)
+
+    print("Ошибочные предсказания для квантованной модели:")
+    show_incorrect_predictions(quantized_model, test_loader, device)
