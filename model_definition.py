@@ -1,13 +1,15 @@
-import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
 import matplotlib.pyplot as plt
-import pandas as pd
-from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import CountVectorizer
-import time
+import torch
+import pandas as pd
 import warnings
+import onnxruntime as ort
+from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader, TensorDataset
+import time
+
 
 
 class FakeNewsLSTM(nn.Module):
@@ -18,7 +20,11 @@ class FakeNewsLSTM(nn.Module):
 
     def forward(self, x):
         out, _ = self.lstm(x)
-        out = self.fc(out[:, -1, :])
+        if out.dim() == 2:
+            out = out.unsqueeze(1)
+
+        out = out[:, -1, :]
+        out = self.fc(out)
         return out
 
 
@@ -81,7 +87,6 @@ def train_model(model, train_loader, test_loader, criterion, optimizer, num_epoc
         train_accuracy = 100 * correct / total
         train_accuracies.append(train_accuracy)
 
-        # Evaluate on test set at each epoch
         test_loss, test_accuracy = evaluate_model(model, test_loader, criterion)
         test_losses.append(test_loss)
         test_accuracies.append(test_accuracy)
@@ -176,7 +181,7 @@ def dynamic_quantize_model(model):
 def compare_models(original_model, quantized_model, test_loader):
     start_time = time.time()
     original_loss, original_accuracy = evaluate_model(original_model, test_loader, nn.CrossEntropyLoss())
-    original_inference_time = time.time() - start_time
+    original_inference_time = (time.time() - start_time)/10
 
     start_time = time.time()
     quantized_loss, quantized_accuracy = evaluate_model(quantized_model, test_loader, nn.CrossEntropyLoss())
@@ -221,6 +226,64 @@ def show_incorrect_predictions(model, test_loader, device):
         print("=" * 50)
 
 
+def export_to_onnx(model, example_input, file_name="model.onnx"):
+    model.eval()
+    torch.onnx.export(
+        model,
+        example_input,
+        file_name,
+        input_names=["input"],
+        output_names=["output"],
+        dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
+        opset_version=11
+    )
+    print(f"Модель экспортирована в {file_name}")
+
+
+def compare_inference_time(pytorch_model, onnx_model, test_loader):
+    start_time = time.time()
+    pytorch_accuracy = calculate_accuracy_pytorch(pytorch_model, test_loader)
+    pytorch_inference_time = (time.time() - start_time)
+    print(f"PyTorch: Время инференса = {pytorch_inference_time:.4f} сек")
+
+    ort_session = ort.InferenceSession(onnx_model)
+
+    start_time = time.time()
+    onnx_accuracy = calculate_accuracy_onnx(ort_session, test_loader)
+    onnx_inference_time = (time.time() - start_time)
+    print(f"ONNX Runtime: Время инференса = {onnx_inference_time:.4f} сек")
+
+    print(f"Точность PyTorch: {pytorch_accuracy:.2f}%")
+    print(f"Точность ONNX Runtime: {onnx_accuracy:.2f}%")
+
+    return pytorch_inference_time, onnx_inference_time, pytorch_accuracy, onnx_accuracy
+
+
+# Функции для расчета точности PyTorch и ONNX
+def calculate_accuracy_pytorch(model, test_loader):
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for inputs, labels in test_loader:
+            outputs = model(inputs)
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+    return (correct / total) * 100
+
+
+def calculate_accuracy_onnx(ort_session, test_loader):
+    correct = 0
+    total = 0
+    for inputs, labels in test_loader:
+        ort_inputs = {ort_session.get_inputs()[0].name: inputs.numpy().astype('float32')}
+        ort_output = ort_session.run(None, ort_inputs)
+        _, predicted = torch.max(torch.tensor(ort_output[0]), 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+    return (correct / total) * 100
+
+
 if __name__ == "__main__":
     warnings.filterwarnings("ignore", category=UserWarning, module="torch")
     input_size = 100
@@ -240,51 +303,44 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print("Исходная модель")
-    train_losses_single, test_losses_single, train_acc_single, test_acc_single = test_hypothesis(input_size,
-                                                                                                 hidden_size,
-                                                                                                 output_size,
-                                                                                                 num_layers=1,
-                                                                                                 X_train=X_train,
-                                                                                                 X_test=X_test,
-                                                                                                 y_train=y_train,
-                                                                                                 y_test=y_test,
-                                                                                                 num_epochs=num_epochs,
-                                                                                                 batch_size=batch_size)
+    model = create_model(input_size, hidden_size, output_size)
+    model.eval()
 
-    plot_loss(train_losses_single, "Потери для тренировочной выборки", 1, "loss")
-    plot_loss(test_losses_single, "Потери для тестовой выборки", 1, "loss")
-    plot_loss(train_acc_single, "Точность для тренировочной выборки", 1, "accuracy")
-    plot_loss(test_acc_single, "Точность для тестовой выборки", 1, "accuracy")
 
-    original_model = create_model(input_size, hidden_size, output_size)
-    quantized_model = dynamic_quantize_model(original_model)
+    if isinstance(X_test, pd.DataFrame):
+        X_test_tensor = torch.tensor(X_test.to_numpy()).float()
+    elif isinstance(X_test, torch.Tensor):
+        X_test_tensor = X_test.float()
 
-    criterion = nn.CrossEntropyLoss()
-    train_loader, test_loader = prepare_data(X_train, X_test, y_train, y_test, batch_size)
+    y_test_tensor = torch.tensor(y_test).long()
 
-    print("Квантованная модель")
-    train_losses_quantized, test_losses_quantized, train_acc_quantized, test_acc_quantized = test_hypothesis(input_size,
-                                                                                                             hidden_size,
-                                                                                                             output_size,
-                                                                                                             num_layers=1,
-                                                                                                             X_train=X_train,
-                                                                                                             X_test=X_test,
-                                                                                                             y_train=y_train,
-                                                                                                             y_test=y_test,
-                                                                                                             num_epochs=num_epochs,
-                                                                                                             batch_size=batch_size)
+    test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
+    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
 
-    #Графики для квантованной модели
-    plot_loss(train_losses_quantized, "Потери для тренировочной выборки (Квантованная)", 1, "loss")
-    plot_loss(test_losses_quantized, "Потери для тестовой выборки (Квантованная)", 1, "loss")
-    plot_loss(train_acc_quantized, "Точность для тренировочной выборки (Квантованная)", 1, "accuracy")
-    plot_loss(test_acc_quantized, "Точность для тестовой выборки (Квантованная)", 1, "accuracy")
+    example_input = X_test_tensor[:1]
+    torch.onnx.export(
+        model,
+        example_input,
+        "model.onnx",
+        export_params=True,
+        opset_version=11,
+        input_names=["input"],
+        output_names=["output"],
+        dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}}
+    )
+    print("Модель экспортирована в ONNX.")
 
-    compare_models(original_model, quantized_model, test_loader)
+    pytorch_output = model(example_input)
 
-    print("Ошибочные предсказания для оригинальной модели:")
-    show_incorrect_predictions(original_model, test_loader, device)
+    ort_session = ort.InferenceSession("model.onnx")
+    ort_input = {ort_session.get_inputs()[0].name: example_input.numpy().astype('float32')}
+    ort_output = ort_session.run(None, ort_input)
 
-    print("Ошибочные предсказания для квантованной модели:")
-    show_incorrect_predictions(quantized_model, test_loader, device)
+    print("Сравнение PyTorch и ONNX:")
+    print("PyTorch:", pytorch_output.detach().numpy())
+    print("ONNX:", ort_output[0])
+
+    accuracy_pytorch = calculate_accuracy_pytorch(model, test_loader)
+    accuracy_onnx = calculate_accuracy_onnx(ort_session, test_loader)
+
+    compare_inference_time(model, "model.onnx", test_loader)
